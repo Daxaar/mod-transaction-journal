@@ -1,0 +1,7 @@
+*.before-*
+__pycache__/
+*.log
+build/
+transaction_journal.conf
+transaction-monitoring.txt
+transaction-journal-requests/

@@ -1,0 +1,4 @@
+[worldserver]
+TransactionJournal.Enable = 0
+TransactionJournal.MonitoringFile = "/logs/transaction-monitoring.txt"
+TransactionJournal.AHBotGUIDs = ""
