@@ -19,7 +19,7 @@ Money capture snapshots tracked nearby group members' balances in OnPlayerBefore
 ## Installation
 
 1. Place this repository at modules/mod-transaction-journal in an AzerothCore source tree.
-2. Apply sql/001_transaction_journal.sql and then sql/002_loot_sources.sql to the character database. Apply each migration once.
+2. Apply sql/001_transaction_journal.sql then sql/002_loot_sources.sql and sql/003_mail_sends.sql to the character database. Apply each migration once.
 3. Build worldserver with static modules using your existing build process.
 4. Copy conf/transaction_journal.conf.dist to the worldserver module configuration directory as transaction_journal.conf.
 5. Set TransactionJournal.Enable to 1. Choose a monitoring file in a directory accessible to worldserver and the Hub. Set AHBotGUIDs to your own auction-bot character GUIDs when applicable.
