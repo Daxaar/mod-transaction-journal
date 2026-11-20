@@ -3,6 +3,7 @@
 #include "Config.h"
 #include "DatabaseEnv.h"
 #include "Item.h"
+#include "Mail.h"
 #include "Player.h"
 #include "Log.h"
 #include "Creature.h"
@@ -128,6 +129,19 @@ struct MoneySnapshot
 };
 // Both callbacks run synchronously within the same loot-money handler.
 thread_local std::unordered_map<uint32, MoneySnapshot> moneySnapshots;
+
+struct MailAttachmentSnapshot
+{
+    uint32 entry, quantity;
+};
+struct MailSendSnapshot
+{
+    uint32 receiver, money, cod, balance;
+    std::string subject;
+    std::unordered_map<uint32, MailAttachmentSnapshot> items;
+};
+std::mutex mailMutex;
+std::unordered_map<uint32, MailSendSnapshot> mailPending;
 
 void AuctionEvent(AuctionEntry* auction, char const* kind, uint32 proceeds = 0)
 {
@@ -307,6 +321,24 @@ public:
             capture(player);
         moneySnapshots[player->GetGUID().GetCounter()] = std::move(snapshot);
     }
+    bool OnPlayerCanSendMail(Player* player, ObjectGuid receiver, ObjectGuid, std::string& subject,
+        std::string&, uint32 money, uint32 cod, Item* item) override
+    {
+        uint32 actor = player->GetGUID().GetCounter();
+        if (!ready || (!IsTracked(actor) && !IsTracked(receiver.GetCounter())))
+            return true;
+        std::lock_guard<std::mutex> lock(mailMutex);
+        auto found = mailPending.find(actor);
+        if (found == mailPending.end() || found->second.receiver != receiver.GetCounter()
+            || found->second.subject != subject || found->second.money != money
+            || found->second.cod != cod)
+        {
+            mailPending[actor] = {receiver.GetCounter(), money, cod, player->GetMoney(), subject, {}};
+        }
+        if (item)
+            mailPending[actor].items[item->GetGUID().GetCounter()] = {item->GetEntry(), item->GetCount()};
+        return true;
+    }
     bool OnPlayerCanSellItem(Player* player, Item*, Creature*) override
     {
         uint32 guid = player->GetGUID().GetCounter();
@@ -369,11 +401,19 @@ public:
     }
     void OnPlayerUpdate(Player* player, uint32) override
     {
+        {
+            std::lock_guard<std::mutex> lock(mailMutex);
+            mailPending.erase(player->GetGUID().GetCounter());
+        }
         std::lock_guard<std::mutex> lock(vendorMutex);
         pending.erase(player->GetGUID().GetCounter());
     }
     void OnPlayerLogout(Player* player) override
     {
+        {
+            std::lock_guard<std::mutex> lock(mailMutex);
+            mailPending.erase(player->GetGUID().GetCounter());
+        }
         std::lock_guard<std::mutex> lock(vendorMutex);
         pending.erase(player->GetGUID().GetCounter());
     }
@@ -405,10 +445,57 @@ public:
     }
 };
 
+class TransactionJournalMail : public MailScript
+{
+public:
+    TransactionJournalMail() : MailScript("TransactionJournalMail") { }
+    void OnBeforeMailDraftSendMailTo(MailDraft* draft, MailReceiver const& receiver,
+        MailSender const& sender, MailCheckMask&, uint32&, uint32&, bool&, bool& sendMail) override
+    {
+        if (!ready || !sendMail || sender.GetMailMessageType() != MAIL_NORMAL)
+            return;
+        uint32 actor = sender.GetSenderId();
+        std::lock_guard<std::mutex> lock(mailMutex);
+        auto found = mailPending.find(actor);
+        if (found == mailPending.end())
+            return;
+        MailSendSnapshot snapshot = std::move(found->second);
+        mailPending.erase(found);
+        Player* player = ObjectAccessor::FindConnectedPlayer(ObjectGuid::Create<HighGuid::Player>(actor));
+        uint32 postage = 30 * std::max<std::size_t>(1, snapshot.items.size());
+        if (!player || snapshot.receiver != receiver.GetPlayerGUIDLow()
+            || snapshot.subject != draft->GetSubject() || snapshot.money != draft->GetMoney()
+            || snapshot.balance < player->GetMoney()
+            || uint64(snapshot.balance - player->GetMoney()) != uint64(postage) + draft->GetMoney())
+            return; // Returns and mail generated directly by scripts do not pay this postage.
+        std::ostringstream attachments;
+        attachments << "[";
+        uint32 quantity = 0;
+        bool first = true;
+        for (auto const& pair : snapshot.items)
+        {
+            if (!first) attachments << ",";
+            first = false;
+            attachments << "{\"item_id\":" << pair.second.entry << ",\"quantity\":" << pair.second.quantity << "}";
+            quantity += pair.second.quantity;
+        }
+        attachments << "]";
+        CharacterDatabase.EscapeString(snapshot.subject);
+        CharacterDatabase.Execute(
+            "INSERT INTO transaction_journal "
+            "(event_uuid,event_kind,actor_guid,counterparty_guid,item_id,quantity,gross,fee,"
+            "mail_postage,mail_money,mail_cod,mail_subject,mail_items) "
+            "VALUES(UUID(),'mail_sent_observed',{},{},0,{},{},{},{},{},{},'{}','{}')",
+            actor, snapshot.receiver, quantity, uint64(postage) + draft->GetMoney(), postage,
+            postage, draft->GetMoney(), draft->GetCOD(), snapshot.subject, attachments.str());
+    }
+};
+
 void Addmod_transaction_journalScripts()
 {
     new TransactionJournalWorld();
     new TransactionJournalAuction();
     new TransactionJournalPlayer();
     new TransactionJournalLoot();
+    new TransactionJournalMail();
 }
